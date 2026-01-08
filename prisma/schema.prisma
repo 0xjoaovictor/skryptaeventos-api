@@ -1,0 +1,671 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============== USER MODELS ==============
+
+model User {
+  id              String     @id @default(cuid())
+  email           String     @unique
+  name            String
+  password        String
+  role            UserRole   @default(ORGANIZER)
+  phone           String?
+  avatar          String?
+  cpf             String?    @unique // Important for Brazilian market
+
+  // Email verification
+  emailVerified       Boolean    @default(false)
+  emailVerifiedAt     DateTime?
+  verificationToken   String?    @unique
+
+  // Password reset
+  resetToken          String?    @unique
+  resetTokenExpiresAt DateTime?
+
+  // Account status
+  isActive        Boolean    @default(true)
+  lastLoginAt     DateTime?
+
+  // ASAAS Integration (for organizers)
+  asaasAccountId  String?    @unique // ASAAS subaccount ID
+  asaasWalletId   String?    @unique // ASAAS wallet ID for payment splits
+  asaasApiKey     String?    // ASAAS API key for subaccount (encrypted)
+
+  // Relations
+  events          Event[]
+  orders          Order[]
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([email])
+  @@index([cpf])
+}
+
+enum UserRole {
+  ORGANIZER
+  ATTENDEE
+  ADMIN
+}
+
+// ============== EVENT MODELS ==============
+
+model Event {
+  id              String     @id @default(cuid())
+  title           String
+  slug            String?    @unique // URL-friendly identifier
+  description     String?
+  image           String?
+  subject         String
+  category        String?
+
+  // Date and Time
+  startsAt        DateTime
+  endsAt          DateTime
+
+  // Location (Presential)
+  locationType    String     @default("new") // new, to_define, existing, online
+  address         String?
+  locationName    String?
+  streetName      String?
+  neighborhood    String?
+  city            String?
+  state           String?
+  zipCode         String?
+  streetNumber    String?
+  complement      String?
+  showOnMaps      Boolean    @default(false)
+  latitude        Float?
+  longitude       Float?
+
+  // Online Event Fields
+  isOnline            Boolean    @default(false)
+  onlineUrl           String?    // Zoom, YouTube, Meet link
+  onlinePlatform      String?    // "zoom", "youtube", "meet", "custom"
+  onlinePassword      String?    // Meeting password if needed
+  onlineInstructions  String?    // How to access
+  isHybrid            Boolean    @default(false) // Both online and presential
+
+  // Producer Info
+  producerName        String
+  producerDescription String?
+
+  // Configuration
+  ticketType      TicketType  @default(PAID)
+  status          EventStatus @default(DRAFT)
+  visibility      Visibility  @default(PUBLIC)
+
+  // Custom Forms (JSON for flexibility)
+  customForms     Json?       @default("[]")
+
+  // Capacity
+  totalCapacity   Int?        // Max attendees (null = unlimited)
+
+  // Refund Policy (Sympla-style implementation)
+  refundAllowed         Boolean   @default(true)   // Whether refunds are allowed
+  refundDeadlineDays    Int?                       // Days before event (null = until event starts)
+  refundPercentage      Int       @default(100)    // Refund percentage (0-100)
+  refundPolicy          String?                    // Free text with policy details
+  refundPolicyLocked    Boolean   @default(false)  // Locked after first sale
+  platformFeeRefundable Boolean   @default(false)  // Whether platform fee is refunded
+
+  // Organizer
+  organizerId     String
+  organizer       User        @relation(fields: [organizerId], references: [id])
+
+  // Relations
+  tickets             Ticket[]
+  orders              Order[]
+  ticketCategories    TicketCategory[]
+  customFormFields    CustomFormField[]
+  promoCodes          PromoCode[]
+
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  @@index([organizerId])
+  @@index([status])
+  @@index([visibility])
+  @@index([slug])
+  @@index([startsAt])
+}
+
+enum TicketType {
+  PAID
+  FREE
+  BOTH
+}
+
+enum EventStatus {
+  DRAFT
+  ACTIVE
+  ENDED
+  CANCELLED
+  PAUSED
+}
+
+enum Visibility {
+  PUBLIC
+  PRIVATE
+  UNLISTED // Accessible via link only
+}
+
+// ============== TICKET MODELS ==============
+
+model Ticket {
+  id                    String     @id @default(cuid())
+  eventId               String
+  event                 Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  categoryId            String?
+  category              TicketCategory? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+
+  title                 String
+  description           String?
+  type                  TicketType
+  price                 Decimal    @default(0) @db.Decimal(10, 2)
+  quantity              Int
+  quantitySold          Int        @default(0)
+  quantityReserved      Int        @default(0) // Tickets in pending orders
+
+  // Min/Max per purchase
+  minQuantity           Int        @default(1)
+  maxQuantity           Int        @default(10)
+
+  // Sales Period
+  salesStartsAt         DateTime
+  salesEndsAt           DateTime
+
+  // Availability
+  availability          TicketAvailability @default(PUBLIC)
+  isVisible             Boolean    @default(true)
+
+  // Service Fee
+  absorbServiceFee      Boolean    @default(true)
+  serviceFeePercentage  Decimal    @default(3.0) @db.Decimal(5, 2)
+
+  // Half Price Option (Meia-entrada)
+  hasHalfPrice          Boolean    @default(false)
+  halfPriceTitle        String?
+  halfPrice             Decimal?   @db.Decimal(10, 2)
+  halfPriceQuantity     Int?
+  halfPriceSold         Int        @default(0)
+
+  // Display order
+  displayOrder          Int        @default(0)
+
+  // Relations
+  orderItems            OrderItem[]
+  ticketInstances       TicketInstance[]
+
+  createdAt             DateTime   @default(now())
+  updatedAt             DateTime   @updatedAt
+
+  @@index([eventId])
+  @@index([categoryId])
+  @@index([availability])
+  @@index([type])
+}
+
+enum TicketAvailability {
+  PUBLIC
+  RESTRICTED  // Needs access code
+  MANUAL      // Complimentary/manual entry
+  HIDDEN      // Not visible but can be accessed via link
+}
+
+// ============== TICKET INSTANCE MODEL (Individual Tickets) ==============
+
+model TicketInstance {
+  id              String     @id @default(cuid())
+  
+  orderItemId     String
+  orderItem       OrderItem  @relation(fields: [orderItemId], references: [id], onDelete: Cascade)
+  
+  ticketId        String
+  ticket          Ticket     @relation(fields: [ticketId], references: [id])
+  
+  // Attendee info (can be different from buyer)
+  attendeeName    String?
+  attendeeEmail   String?
+  attendeeCpf     String?    // For meia-entrada validation
+  attendeePhone   String?
+  
+  // QR Code - unique identifier for this ticket
+  qrCode          String     @unique @default(cuid())
+  
+  // Status
+  status          TicketInstanceStatus @default(ACTIVE)
+  
+  // Check-in info
+  checkedInAt     DateTime?
+  checkedInBy     String?    // User ID who performed check-in
+  checkInNotes    String?
+  checkInLocation String?    // Which gate/entrance
+  
+  // Half-price
+  isHalfPrice     Boolean    @default(false)
+  
+  // Transfer
+  transferredAt   DateTime?
+  transferredFrom String?    // Previous owner email
+  
+  // Custom form responses for this attendee
+  formResponses   Json?      @default("{}")
+
+  // Relations
+  refunds         Refund[]   // Refunds for this specific ticket
+
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([orderItemId])
+  @@index([ticketId])
+  @@index([qrCode])
+  @@index([status])
+  @@index([attendeeEmail])
+}
+
+enum TicketInstanceStatus {
+  ACTIVE        // Valid ticket
+  CHECKED_IN    // Already entered the event
+  CANCELLED     // Ticket cancelled
+  TRANSFERRED   // Transferred to another person
+  REFUNDED      // Refunded
+  EXPIRED       // Event has passed
+}
+
+// ============== ORDER MODELS ==============
+
+model Order {
+  id                String     @id @default(cuid())
+  orderNumber       String     @unique @default(cuid()) // Human-readable order number
+  
+  eventId           String
+  event             Event      @relation(fields: [eventId], references: [id])
+
+  buyerId           String
+  buyer             User       @relation(fields: [buyerId], references: [id])
+
+  // Pricing breakdown
+  subtotal          Decimal    @db.Decimal(12, 2)  // Before fees/discounts
+  discount          Decimal    @default(0) @db.Decimal(12, 2)
+  serviceFee        Decimal    @default(0) @db.Decimal(12, 2)
+  platformFee       Decimal    @default(0) @db.Decimal(12, 2)
+  total             Decimal    @db.Decimal(12, 2)  // Final amount
+
+  status            OrderStatus @default(PENDING)
+  
+  // Payment info
+  paymentMethod     String?
+  paymentId         String?    @unique
+  paidAt            DateTime?
+  
+  // Promo code
+  promoCodeId       String?
+  promoCode         PromoCode? @relation(fields: [promoCodeId], references: [id])
+  
+  // Buyer info snapshot (in case user data changes)
+  buyerName         String?
+  buyerEmail        String?
+  buyerPhone        String?
+  buyerCpf          String?
+
+  // Expiration for pending orders (auto-cancel)
+  expiresAt         DateTime?
+
+  // Email tracking
+  ticketEmailSent   Boolean    @default(false)  // Has ticket confirmation email been sent
+  ticketEmailSentAt DateTime?  // When ticket email was sent
+  ticketEmailError  String?    // Last email error message if any
+
+  // Notes
+  notes             String?
+  internalNotes     String?    // Admin notes
+
+  // Relations
+  items             OrderItem[]
+  payment           Payment?
+  refunds           Refund[]
+
+  createdAt         DateTime   @default(now())
+  updatedAt         DateTime   @updatedAt
+
+  @@index([eventId])
+  @@index([buyerId])
+  @@index([status])
+  @@index([orderNumber])
+  @@index([createdAt])
+}
+
+enum OrderStatus {
+  PENDING       // Awaiting payment
+  PROCESSING    // Payment being processed
+  CONFIRMED     // Payment confirmed, tickets issued
+  COMPLETED     // Event attended
+  CANCELLED     // Order cancelled
+  REFUNDED      // Fully refunded
+  PARTIAL_REFUND // Partially refunded
+  EXPIRED       // Payment window expired
+}
+
+model OrderItem {
+  id          String   @id @default(cuid())
+  orderId     String
+  order       Order    @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  ticketId    String
+  ticket      Ticket   @relation(fields: [ticketId], references: [id])
+
+  quantity    Int
+  unitPrice   Decimal  @db.Decimal(10, 2)  // Price per ticket at time of order
+  totalPrice  Decimal  @db.Decimal(10, 2)  // quantity * unitPrice
+
+  isHalfPrice Boolean  @default(false)
+
+  // Attendee information with form responses (stored until payment confirmation)
+  // Array of attendee data - one per ticket quantity
+  // Each attendee has: {attendeeName, attendeeEmail, attendeeCpf?, attendeePhone?, formResponses}
+  attendeesData Json?   @default("[]")
+
+  // Relations to individual ticket instances
+  ticketInstances TicketInstance[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([orderId])
+  @@index([ticketId])
+}
+
+// ============== PAYMENT MODELS ==============
+
+model Payment {
+  id                    String        @id @default(cuid())
+  orderId               String        @unique
+  order                 Order         @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  amount                Decimal       @db.Decimal(12, 2)
+  method                PaymentMethod
+  status                PaymentStatus @default(PENDING)
+
+  // Payment Provider Details
+  providerName          String?       // stripe, mercadopago, pagseguro, etc
+  providerTransactionId String?       @unique
+  providerResponse      Json?
+
+  // For PIX
+  pixCode               String?       // PIX copy-paste code
+  pixQrCode             String?       // PIX QR code image URL
+  pixExpiresAt          DateTime?
+
+  // For Boleto
+  boletoCode            String?       // Boleto barcode
+  boletoUrl             String?       // Boleto PDF URL
+  boletoExpiresAt       DateTime?
+
+  // Metadata
+  description           String?
+  notes                 String?
+
+  // Relations
+  refunds               Refund[]
+
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  processedAt           DateTime?
+
+  @@index([orderId])
+  @@index([status])
+  @@index([providerTransactionId])
+}
+
+enum PaymentMethod {
+  CREDIT_CARD
+  DEBIT_CARD
+  PIX
+  BOLETO
+  BANK_TRANSFER
+  NUPAY
+  FREE          // For free tickets
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  EXPIRED
+}
+
+model Refund {
+  id                    String       @id @default(cuid())
+  orderId               String
+  order                 Order        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  paymentId             String?
+  payment               Payment?     @relation(fields: [paymentId], references: [id])
+
+  // Optional: Refund specific ticket instance (Sympla-style individual ticket refund)
+  ticketInstanceId      String?
+  ticketInstance        TicketInstance? @relation(fields: [ticketInstanceId], references: [id])
+
+  amount                Decimal      @db.Decimal(12, 2)
+  reason                RefundReason
+  status                RefundStatus @default(PENDING)
+
+  // Refund Type (determines fee handling)
+  refundType            RefundType   @default(EVENT_POLICY) // CDC, EVENT_CANCELLED, or EVENT_POLICY
+  platformFeeRefunded   Boolean      @default(false)        // Whether platform fee was refunded
+  platformFeeAmount     Decimal?     @db.Decimal(12, 2)     // Platform fee amount if refunded
+
+  // Refund Provider Details
+  providerTransactionId String?
+  providerResponse      Json?
+
+  // Metadata
+  notes                 String?
+  requestedBy           String?      // User ID who requested
+  approvedBy            String?      // Admin/Organizer who approved
+  rejectionReason       String?
+
+  createdAt             DateTime     @default(now())
+  updatedAt             DateTime     @updatedAt
+  processedAt           DateTime?
+
+  @@index([orderId])
+  @@index([paymentId])
+  @@index([ticketInstanceId])
+  @@index([status])
+  @@index([refundType])
+}
+
+enum RefundReason {
+  CUSTOMER_REQUEST
+  EVENT_CANCELLED
+  EVENT_POSTPONED
+  DUPLICATE_PAYMENT
+  PAYMENT_ERROR
+  TICKET_TRANSFER_FAILED
+  CDC_7_DAYS            // Brazilian Consumer Defense Code - 7 day right
+  OTHER
+}
+
+enum RefundType {
+  CDC_7_DAYS            // Brazilian CDC - refunds platform fee
+  EVENT_CANCELLED       // Event cancelled - refunds platform fee
+  EVENT_POLICY          // Normal refund - does NOT refund platform fee
+}
+
+enum RefundStatus {
+  PENDING
+  APPROVED
+  PROCESSING
+  COMPLETED
+  REJECTED
+  CANCELLED
+}
+
+// ============== TICKET CATEGORY MODELS ==============
+
+model TicketCategory {
+  id          String     @id @default(cuid())
+  eventId     String
+  event       Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  name        String
+  description String?
+  displayOrder Int       @default(0)
+  isActive    Boolean    @default(true)
+
+  // Relations
+  tickets     Ticket[]
+
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+// ============== CUSTOM FORM MODELS ==============
+
+model CustomFormField {
+  id           String        @id @default(cuid())
+  eventId      String
+  event        Event         @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  fieldName    String        // Internal name (e.g., "company_name")
+  fieldLabel   String        // Display label (e.g., "Company Name")
+  fieldType    FormFieldType
+  placeholder  String?
+  helpText     String?
+  isRequired   Boolean       @default(false)
+  displayOrder Int           @default(0)
+
+  // Field configuration (JSON)
+  // Can store: validation rules, options for select/radio, min/max values, etc
+  configuration Json?        @default("{}")
+
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@unique([eventId, fieldName])
+  @@index([eventId])
+}
+
+enum FormFieldType {
+  TEXT
+  EMAIL
+  PHONE
+  CPF
+  DATE
+  DATETIME
+  NUMBER
+  TEXTAREA
+  SELECT
+  RADIO
+  CHECKBOX
+  FILE
+  URL
+}
+
+// ============== PROMO CODE MODELS ==============
+
+model PromoCode {
+  id              String       @id @default(cuid())
+  eventId         String
+  event           Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  code            String
+  description     String?
+
+  // Discount Configuration
+  discountType    DiscountType
+  discountValue   Decimal      @db.Decimal(10, 2)
+
+  // Usage Limits
+  maxUses         Int?         // null = unlimited
+  currentUses     Int          @default(0)
+  usesPerUser     Int          @default(1)
+
+  // Validity
+  validFrom       DateTime
+  validUntil      DateTime?
+  isActive        Boolean      @default(true)
+
+  // Restrictions
+  minOrderValue   Decimal?     @db.Decimal(10, 2)
+  maxDiscountAmount Decimal?   @db.Decimal(10, 2) // Cap for percentage discounts
+  applicableTickets String?    // JSON array of ticket IDs (null = all)
+
+  // Relations
+  orders          Order[]
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  @@unique([eventId, code])
+  @@index([eventId])
+  @@index([code])
+  @@index([isActive])
+}
+
+enum DiscountType {
+  PERCENTAGE
+  FIXED
+}
+
+// ============== SESSION MODEL (for Auth) ==============
+
+model Session {
+  id          String   @id @default(cuid())
+  userId      String
+  
+  token       String   @unique
+  userAgent   String?
+  ipAddress   String?
+  
+  expiresAt   DateTime
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+}
+
+// ============== AUDIT LOG (Optional but recommended) ==============
+
+model AuditLog {
+  id          String   @id @default(cuid())
+  
+  userId      String?
+  action      String   // "CREATE_EVENT", "UPDATE_ORDER", "CHECK_IN", etc.
+  entityType  String   // "Event", "Order", "TicketInstance", etc.
+  entityId    String
+  
+  oldValues   Json?
+  newValues   Json?
+  
+  ipAddress   String?
+  userAgent   String?
+  
+  createdAt   DateTime @default(now())
+  
+  @@index([userId])
+  @@index([entityType, entityId])
+  @@index([action])
+  @@index([createdAt])
+}

@@ -1,0 +1,26 @@
+// Supabase Database Schema for Waitlist
+// This is a separate database for the waitlist feature
+generator client {
+  provider = "prisma-client-js"
+  output   = "../node_modules/@prisma/waitlist-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("SUPABASE_DATABASE_URL")
+}
+
+model Waitlist {
+  id              String   @id @default(cuid())
+  churchName      String   @map("church_name")
+  responsibleName String   @map("responsible_name")
+  email           String
+  whatsapp        String
+  city            String
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  @@map("waitlist")
+  @@index([email])
+  @@index([createdAt])
+}
