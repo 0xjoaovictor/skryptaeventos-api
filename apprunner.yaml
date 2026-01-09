@@ -4,15 +4,14 @@ build:
   commands:
     pre-build:
       - echo "Installing dependencies..."
+      - yarn install
     build:
       - echo "Building application..."
-      - yarn install
       - yarn db:waitlist:generate
       - yarn build
     post-build:
       - echo "Build completed successfully"
 run:
-  runtime-version: 18
   command: yarn start:prod
   network:
     port: 3000
